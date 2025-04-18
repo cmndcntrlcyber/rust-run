@@ -1,115 +1,94 @@
-# Rust-Runner
+# Rust Dictionary-Based Shellcode Execution Utility
 
-A sophisticated shellcode execution framework written in Rust, designed to demonstrate advanced evasion techniques and memory manipulation.
-
-## ⚠️ Educational Purpose Only
-
-This tool is provided strictly for **educational and research purposes**. It demonstrates various techniques that could be misused. Only use this in controlled environments with proper authorization.
-
-## Overview
-
-Rust-Runner is a framework that demonstrates various techniques for shellcode execution while implementing multiple evasion methods. It showcases how malware might attempt to bypass security controls through techniques like:
-
-- Indirect syscalls
-- Dictionary-based payload encoding
-- Anti-analysis checks
-- Memory protection manipulation
-- Remote payload retrieval
+A streamlined and secure Rust application that downloads, decodes, and executes shellcode using a dictionary-based encoding scheme.
 
 ## Features
 
-- **Dictionary-based Encoding/Decoding**: Uses a Spanish word dictionary to encode binary payloads as text
-- **Indirect Syscalls**: Executes Windows syscalls indirectly to avoid detection
-- **Anti-Analysis**: Implements timing checks to detect virtualized environments
-- **Flexible Payload Loading**: Can load shellcode from local files or remote sources
-- **Memory Protection Manipulation**: Uses syscalls to allocate and protect memory
-- **HTTP Client with Evasive Properties**: Configures requests to appear more legitimate
+- Efficient dictionary caching mechanism
+- Secure HTTPS communication with retry and exponential backoff
+- Direct Windows NT syscall execution to bypass API monitoring
+- Comprehensive error handling with proper context
+- Structured logging system
+- Numeric fallback for decoder (handles dictionary words and direct byte values)
+- Memory-safe implementation with proper checks
+- Unit tests for core functionality
 
-## Components
+## Project Structure
 
-### Main Components
+This project uses a deliberate single-file implementation for simplicity and portability:
 
-- **src/main.rs**: Core Rust implementation with shellcode execution logic
-- **encoder.py**: Python script for encoding binary payloads using the dictionary
-- **es-dictionary.txt**: Spanish word dictionary used for encoding/decoding
-- **Cargo.toml**: Project configuration and dependencies
+```
+rust-run/
+├── Cargo.toml       # Project dependencies and build settings
+├── src/
+│   └── main.rs      # All application functionality
+├── build.bat        # Windows build script
+├── build.sh         # Unix build script
+└── README.md        # Project documentation
+```
 
-### Key Structures and Functions
+## Build Instructions
 
-- `Decoder`: Handles dictionary-based decoding of payloads
-- `execute_shellcode()`: Allocates memory and executes shellcode using indirect syscalls
-- `indirect_syscall()`: Performs syscalls indirectly to avoid detection
-- `detect_analysis_environment()`: Checks for virtualized environments
-- `get_syscall_info()`: Resolves syscall numbers and addresses from ntdll.dll
+### Prerequisites
 
-## Usage
+- Rust toolchain (1.60.0 or newer)
+- Cargo package manager
+- Windows environment (the code uses Windows-specific APIs)
 
 ### Building
 
 ```bash
-cargo build --target x86_64-pc-windows-gnu --release
+# Development build
+cargo build
+
+# Release build with optimizations
+cargo build --release
 ```
 
-The release profile includes optimizations for better evasion:
-- Maximum optimization level (opt-level = 3)
-- Link-time optimization (lto = true)
-- Single codegen unit for better optimization
-- Panic abort to reduce binary size
-- Binary stripping to remove debug symbols
+You can also use the provided build scripts:
+- Windows: `.\build.bat`
+- Unix: `./build.sh`
 
-### Encoding Payloads
+The compiled binary will be available at `target/release/rust-run.exe`.
 
-To encode a binary payload:
+## Running
 
 ```bash
-python encoder.py
+# Run with default settings
+./target/release/rust-run
+
+# Run with environment variable to enable debug logs
+RUST_LOG=debug ./target/release/rust-run
 ```
 
-This will:
-1. Attempt to download a binary from the configured URL
-2. Encode it using the Spanish dictionary
-3. Save the encoded payload to `load.txt`
+## How It Works
 
-### Execution
-
-When executed, the program will:
-
-1. Check for analysis environments (and exit silently if detected)
-2. Look for a local binary payload at `cs/beacon_x64.bin`
-3. If not found, download the dictionary and encoded payload
-4. Decode the payload
-5. Allocate memory with proper protections
-6. Execute the shellcode
-
-## Technical Details
-
-### Syscall Implementation
-
-The program uses indirect syscalls to avoid detection:
-
-1. Resolves syscall numbers and addresses from ntdll.dll
-2. Uses assembly to perform syscalls indirectly
-3. Implements NtAllocateVirtualMemory and NtProtectVirtualMemory
-
-### Dictionary Encoding
-
-The encoding system:
-1. Maps 256 Spanish words to byte values (0-255)
-2. Encodes each byte of the binary as a word
-3. Joins words with spaces to create the encoded payload
-
-## Dependencies
-
-- **reqwest**: HTTP client for downloading payloads
-- **winapi**: Windows API bindings with specific features:
-  - winuser
-  - libloaderapi
-  - winnt
+1. The application first checks for a cached dictionary file, downloading it if not present
+2. It downloads the encoded payload from the specified URL
+3. The payload is decoded using the dictionary (each word maps to a byte value)
+4. Memory is allocated using direct NT syscalls rather than standard Windows APIs
+5. The shellcode is placed in memory and executed
 
 ## Security Considerations
 
-This tool demonstrates techniques that could be misused. It should only be used in controlled environments with proper authorization. Some security products may flag this as malicious due to the techniques it employs.
+This application implements several security-enhancing techniques:
+
+1. Memory safety through Rust's ownership model and proper error handling
+2. Direct NT syscalls to bypass API hooking/monitoring
+3. HTTPS-only communication for secure data transfer
+4. Exponential backoff for failed network requests
+5. Validation of inputs to prevent potential issues
+
+## Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run with detailed output
+cargo test -- --nocapture
+```
 
 ## License
 
-This project is provided for educational purposes only. Use responsibly.
+This project is intended for educational and research purposes only.

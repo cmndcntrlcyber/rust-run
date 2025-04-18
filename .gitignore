@@ -1,4 +1,26 @@
-target/
-target/release/
-target/x86_64-pc-windows-gnu/
-load.txt
+# Rust-specific
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# Dictionary cache
+dictionary.txt
+dictionary_cache.txt
+
+# System and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+thumbs.db
+
+# Binary files that might be created during testing
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+
+# Build scripts output
+*.log

