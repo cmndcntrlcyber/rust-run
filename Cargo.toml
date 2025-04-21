@@ -2,15 +2,17 @@
 name = "rust-run"
 version = "0.1.0"
 edition = "2021"
-description = "Optimized shellcode execution utility"
+description = "Optimized shellcode execution utility with process creation"
 
 [dependencies]
 reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
 windows-sys = { version = "0.48", features = [
     "Win32_Foundation",
     "Win32_System_Memory", 
-    "Win32_System_LibraryLoader", 
-    "Win32_System_Threading"
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_Security",
+    "Win32_System_Console"
 ] }
 log = "0.4"
 env_logger = "0.10"

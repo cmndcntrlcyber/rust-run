@@ -1,94 +1,94 @@
-# Rust Dictionary-Based Shellcode Execution Utility
+# Optimized Shellcode Execution Utility
 
-A streamlined and secure Rust application that downloads, decodes, and executes shellcode using a dictionary-based encoding scheme.
+A secure and optimized utility for executing encoded shellcode through a dictionary-based decoding mechanism.
 
-## Features
+## Optimizations Implemented
 
-- Efficient dictionary caching mechanism
-- Secure HTTPS communication with retry and exponential backoff
-- Direct Windows NT syscall execution to bypass API monitoring
-- Comprehensive error handling with proper context
-- Structured logging system
-- Numeric fallback for decoder (handles dictionary words and direct byte values)
-- Memory-safe implementation with proper checks
-- Unit tests for core functionality
+The project has been significantly optimized to ensure reliable shellcode execution:
 
-## Project Structure
+### Memory Handling Improvements
 
-This project uses a deliberate single-file implementation for simplicity and portability:
+- **Two-phase memory allocation**: First allocates with RW permissions for safer copying, then switches to execute-only permissions
+- **Memory alignment**: Ensures 16-byte alignment for optimal cache performance
+- **Memory protection**: Uses the principle of least privilege with PAGE_EXECUTE rather than PAGE_EXECUTE_READ
+- **Instruction cache flushing**: Explicitly flushes the CPU instruction cache to ensure code visibility
+- **Memory barriers**: Added memory barriers to prevent instruction reordering
 
-```
-rust-run/
-├── Cargo.toml       # Project dependencies and build settings
-├── src/
-│   └── main.rs      # All application functionality
-├── build.bat        # Windows build script
-├── build.sh         # Unix build script
-└── README.md        # Project documentation
-```
+### Performance Optimizations
+
+- **HashMap-based dictionary lookup**: O(1) lookups instead of O(n) linear searches for significant speed improvement
+- **Local file caching**: Automatically caches dictionary and payload locally to reduce network dependency
+- **Proper memory cleanup**: Ensures allocated memory is properly released even when execution fails
+- **Fallback execution method**: Provides alternative execution path if primary method fails
+- **Optimized builds**: Enhanced build scripts with target-specific optimizations
+
+### Reliability Enhancements
+
+- **Detailed error reporting**: Captures and reports Windows error codes for better diagnostics
+- **Debug mode**: Added debug mode for detailed shellcode inspection
+- **Missing token tracking**: Counts and reports missing dictionary tokens
+- **Type safety improvements**: Proper function signatures for memory-mapped code
+- **Cross-platform build support**: Enhanced build scripts for both Windows and Unix
 
 ## Build Instructions
 
-### Prerequisites
-
-- Rust toolchain (1.60.0 or newer)
-- Cargo package manager
-- Windows environment (the code uses Windows-specific APIs)
-
-### Building
-
-```bash
-# Development build
-cargo build
-
-# Release build with optimizations
-cargo build --release
+### Windows
+```
+build.bat
 ```
 
-You can also use the provided build scripts:
-- Windows: `.\build.bat`
-- Unix: `./build.sh`
-
-The compiled binary will be available at `target/release/rust-run.exe`.
-
-## Running
-
-```bash
-# Run with default settings
-./target/release/rust-run
-
-# Run with environment variable to enable debug logs
-RUST_LOG=debug ./target/release/rust-run
+### Unix-based Systems
+```
+./build.sh
 ```
 
-## How It Works
+Both scripts offer debug or release build options, with release builds applying maximum optimization.
 
-1. The application first checks for a cached dictionary file, downloading it if not present
-2. It downloads the encoded payload from the specified URL
-3. The payload is decoded using the dictionary (each word maps to a byte value)
-4. Memory is allocated using direct NT syscalls rather than standard Windows APIs
-5. The shellcode is placed in memory and executed
+## Usage
+
+The application will automatically:
+
+1. Download (or load cached) dictionary and encoded payload
+2. Decode the payload using the dictionary
+3. Allocate properly aligned and protected memory
+4. Copy and execute the decoded shellcode
+
+### Environment Variables
+
+- `RUST_LOG=debug` - Enable debug logging for detailed execution information
+
+## Technical Implementation Details
+
+### Memory Protection Workflow
+
+1. Allocate memory with `PAGE_READWRITE` permissions
+2. Copy shellcode bytes to allocated memory
+3. Change protection to `PAGE_EXECUTE` (execute-only) using `VirtualProtect`
+4. Flush instruction cache with `FlushInstructionCache`
+5. Insert memory barriers before and after execution
+6. Execute shellcode with proper function signature
+7. Release memory with `VirtualFree`
+
+### Dictionary Decoding Optimization
+
+The original linear search algorithm (`O(n)` complexity) has been replaced with a `HashMap` implementation (`O(1)` complexity), dramatically improving decoding performance, especially for large dictionaries.
+
+### Fallback Execution
+
+If the primary execution method fails, the system falls back to a more permissive approach using `PAGE_EXECUTE_READWRITE` memory protection for maximum compatibility.
 
 ## Security Considerations
 
-This application implements several security-enhancing techniques:
+This utility implements several security measures:
 
-1. Memory safety through Rust's ownership model and proper error handling
-2. Direct NT syscalls to bypass API hooking/monitoring
-3. HTTPS-only communication for secure data transfer
-4. Exponential backoff for failed network requests
-5. Validation of inputs to prevent potential issues
+- HTTPS-only URL validation
+- Memory protection principle of least privilege
+- Proper error handling and reporting
+- Debugger detection
+- Memory cleanup
 
-## Testing
+## Requirements
 
-```bash
-# Run all tests
-cargo test
-
-# Run with detailed output
-cargo test -- --nocapture
-```
-
-## License
-
-This project is intended for educational and research purposes only.
+- Rust 1.67.0 or higher
+- Windows operating system (primary target)
+- Linux/macOS (supported for development only)
