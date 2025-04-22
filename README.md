@@ -1,4 +1,4 @@
-# Optimized Shellcode Execution Utility
+# Rust-Run
 
 A secure and optimized utility for executing encoded shellcode through a dictionary-based decoding mechanism.
 
