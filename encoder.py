@@ -14,7 +14,7 @@ import sys
 # Constants
 DEFAULT_DICTIONARY_PATH = "es-dictionary.txt"
 DEFAULT_OUTPUT_PATH = "load.txt"
-DEFAULT_BINARY_PATH = "mal-bin/msf.bin"
+DEFAULT_BINARY_PATH = "mal-bin/beacon_x64.bin"
 
 def load_dictionary(dictionary_path: str) -> List[str]:
     """Load dictionary words from a file."""

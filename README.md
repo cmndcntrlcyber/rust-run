@@ -33,7 +33,9 @@ The current implementation embeds both the Spanish dictionary and encoded payloa
 ```bash
 # 1. Build the Rust-Run executable with embedded payload
 cd ./rust-run
-cargo build --release --target x86_64-pc-windows-gnu
+
+RUSTFLAGS="-C strip=symbols -C target-feature=+crt-static -C link-arg=-s" cargo build --release --target x86_64-pc-windows-gnu
+```
 
 # 2. Copy the compiled executable to Tex1step's payload directory
 cp target/x86_64-pc-windows-gnu/release/rust-run.exe ../tex1step/payloads/WindowsUpdate.exe

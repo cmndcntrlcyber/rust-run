@@ -5,7 +5,7 @@ edition = "2021"
 description = "Optimized shellcode execution utility with process creation"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"], default-features = false }
 windows-sys = { version = "0.48", features = [
     "Win32_Foundation",
     "Win32_System_Memory", 
@@ -14,8 +14,6 @@ windows-sys = { version = "0.48", features = [
     "Win32_Security",
     "Win32_System_Console"
 ] }
-log = "0.4"
-env_logger = "0.10"
 
 [profile.release]
 opt-level = 3
@@ -23,3 +21,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+debug = false
+debug-assertions = false
+overflow-checks = false
+rpath = false
+incremental = false
