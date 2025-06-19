@@ -12,8 +12,8 @@ from typing import List, Dict, Union, BinaryIO
 import sys
 
 # Constants
-DEFAULT_DICTIONARY_PATH = "es-dictionary.txt"
-DEFAULT_OUTPUT_PATH = "load.txt"
+DEFAULT_DICTIONARY_PATH = "jajajaja.txt"
+DEFAULT_OUTPUT_PATH = "qwertytext.txt"
 DEFAULT_BINARY_PATH = "mal-bin/beacon_x64.bin"
 
 def load_dictionary(dictionary_path: str) -> List[str]:
